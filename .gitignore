@@ -1,0 +1,15 @@
+# Local toolchain (a standalone Node binary downloaded for building/testing)
+.toolchain/
+
+# Cloned upstream sources used only for API research
+research/
+
+# Dependencies (blockbench-types for editor IntelliSense only)
+node_modules/
+
+# OS / editor cruft
+.DS_Store
+*.log
+
+# Local Claude / editor settings
+.claude/

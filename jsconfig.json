@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "module": "commonjs",
+    "target": "ES2019",
+    "lib": ["ES2019", "DOM"],
+    "types": ["blockbench-types"],
+    "baseUrl": ".",
+    "noEmit": true
+  },
+  "include": ["src/**/*.js", "build.js", "test/**/*.js"],
+  "exclude": ["node_modules", "research", ".toolchain", "dist"]
+}

@@ -1,0 +1,32 @@
+{
+  "name": "hytale_uv_preserving_scale",
+  "version": "1.0.0",
+  "description": "Uniformly scales Hytale models without changing their UV size or texture layout.",
+  "private": true,
+  "license": "MIT",
+  "author": "CODEFELICE",
+  "main": "dist/hytale_uv_preserving_scale.js",
+  "scripts": {
+    "build": "node build.js",
+    "test": "node test/run-tests.js",
+    "check": "node --check dist/hytale_uv_preserving_scale.js",
+    "sim": "node test/blockbench-sim.js",
+    "fixtures": "node test/make-fixtures.js",
+    "verify": "node build.js && node test/run-tests.js && node test/blockbench-sim.js"
+  },
+  "devDependencies": {
+    "blockbench-types": "^4.12.2"
+  },
+  "keywords": [
+    "blockbench",
+    "blockbench-plugin",
+    "hytale",
+    "blockymodel",
+    "scale",
+    "uv"
+  ],
+  "repository": {
+    "type": "git",
+    "url": ""
+  }
+}
