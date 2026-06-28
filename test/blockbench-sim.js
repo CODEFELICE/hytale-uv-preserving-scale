@@ -105,10 +105,22 @@ global.Dialog = function (id, opts) {
 	this.confirm = function () { if (typeof opts.onConfirm === 'function') opts.onConfirm.call(self, self.getFormResult()); };
 };
 
+// Simulates the Hytale plugin's lazy .blockyanim load: animations appear in the
+// project only when a select_mode(animate) event fires, and only once.
+var dispatchLog = [];
+var hytaleLazyAnim = null;
+
 global.Blockbench = {
 	showMessageBox: function (o, cb) { msgBoxes.push(o); if (cb) cb(0); },
 	showQuickMessage: function (m) { quickMsgs.push(m); },
-	isOlderThan: function () { return false; }
+	isOlderThan: function () { return false; },
+	dispatchEvent: function (event, data) {
+		dispatchLog.push({ event: event, mode: data && data.mode && data.mode.id });
+		if (event === 'select_mode' && data && data.mode && data.mode.id === 'animate' && hytaleLazyAnim) {
+			global.Animation.all.push(hytaleLazyAnim);
+			hytaleLazyAnim = null; // one-shot, like the real Hytale listener
+		}
+	}
 };
 
 global.Canvas = {
@@ -132,8 +144,8 @@ var nativeBakeCalls = 0;
 var modeEditCalls = 0;
 var originalBakeClickFn = function () { nativeBakeCalls++; };
 global.BarItems = { bake_animation_into_model: { id: 'bake_animation_into_model', click: originalBakeClickFn } };
-global.Animator = { animations: [], MolangParser: { parse: function () { return 1; } } };
-global.Modes = { options: { edit: { select: function () { modeEditCalls++; } } } };
+global.Animator = { animations: [], MolangParser: { parse: function () { return 1; } }, open: false };
+global.Modes = { options: { edit: { select: function () { modeEditCalls++; } }, animate: { id: 'animate', select: function () {} } } };
 
 // Minimal but correct THREE quaternion/euler mock (ZYX, matching Blockbench).
 global.THREE = (function () {
@@ -313,10 +325,17 @@ test('Selected Hierarchy scope only scales the selected subtree', function () {
 	proj.arm.selected = true;
 	global.selected = [];
 
-	clickAndConfirm({ factor: 0.5, scope: 'selection', pivot: 'origin', scale_animations: false });
+	// Explicit Model Origin pivot: the subtree scales around [0,0,0], so it moves.
+	// Switch scope first (which auto-suggests the root pivot), then override to origin.
+	resetLogs();
+	toolsActions[0].click();
+	lastDialog.setFormValues({ scope: 'all', pivot: 'origin' });    // known baseline
+	lastDialog.setFormValues({ scope: 'selection' });               // auto-suggests root
+	lastDialog.setFormValues({ pivot: 'origin', factor: 0.5 });     // override back to world origin
+	lastDialog.confirm();
 
 	assert.strictEqual(undoLog.finish, 1, 'one transaction');
-	// arm subtree scaled
+	// arm subtree scaled (and moved, because the pivot is the world origin)
 	assert.deepStrictEqual(proj.arm.origin, [3, 7, 0], 'arm origin halved');
 	assert.deepStrictEqual(proj.armShape.stretch, [0.5, 0.5, 0.5], 'arm shape stretch halved');
 	// body (not selected) untouched
@@ -325,6 +344,37 @@ test('Selected Hierarchy scope only scales the selected subtree', function () {
 	// aspects only include the arm subtree (1 group, 1 cube)
 	assert.strictEqual(undoLog.lastAspects.elements.length, 1, 'one cube in aspects');
 	assert.strictEqual(undoLog.lastAspects.groups.length, 1, 'one group in aspects');
+});
+
+test('Selected Hierarchy auto-defaults the pivot to the selected root (scales in place)', function () {
+	var proj = buildProject();
+	setProject(proj.roots);
+	global.Group.all.forEach(function (g) { g.selected = false; });
+	proj.arm.selected = true;            // select only the arm bone
+	global.selected = [];
+
+	resetLogs();
+	toolsActions[0].click();                                 // open the dialog
+	lastDialog.setFormValues({ scope: 'all', pivot: 'origin' }); // known starting state
+
+	// Switching to the sub-selection steers the pivot to the selected root...
+	lastDialog.setFormValues({ scope: 'selection' });
+	assert.strictEqual(lastDialog.getFormResult().pivot, 'root', 'selection -> Selected Root');
+	// ...and switching back to the whole model returns to Model Origin.
+	lastDialog.setFormValues({ scope: 'all' });
+	assert.strictEqual(lastDialog.getFormResult().pivot, 'origin', 'all -> Model Origin');
+	// A custom pivot is never overridden by the scope switch.
+	lastDialog.setFormValues({ pivot: 'custom' });
+	lastDialog.setFormValues({ scope: 'selection' });
+	assert.strictEqual(lastDialog.getFormResult().pivot, 'custom', 'custom pivot preserved');
+
+	// With the in-place default, the selected root stays put and its content scales.
+	lastDialog.setFormValues({ pivot: 'root', factor: 0.5 });
+	lastDialog.confirm();
+	assert.strictEqual(undoLog.finish, 1, 'one transaction');
+	assert.deepStrictEqual(proj.arm.origin, [6, 14, 0], 'arm root origin unchanged (scaled in place)');
+	assert.deepStrictEqual(proj.armShape.stretch, [0.5, 0.5, 0.5], 'arm cube stretch halved');
+	assert.deepStrictEqual(proj.root.origin, [0, 12, 0], 'body untouched');
 });
 
 test('custom pivot scales around the given point', function () {
@@ -355,6 +405,66 @@ test('scaling loaded position animations: position ×0.5, scale channel untouche
 	assert.ok(undoLog.lastAspects.animations && undoLog.lastAspects.animations.length === 1, 'animations aspect present');
 	assert.ok(undoLog.lastAspects.keyframes && undoLog.lastAspects.keyframes.length === 1, 'keyframes aspect present');
 	assert.ok(/1 animation/.test(quickMsgs[0]), 'success message mentions animation: ' + quickMsgs[0]);
+	global.Animation = { all: [] };
+});
+
+test('fresh model in edit mode: opening the dialog lazy-loads the animations so they can be scaled', function () {
+	var proj = buildProject();
+	setProject(proj.roots);
+	global.Format = { id: 'hytale_character' };
+	global.Animation = { all: [] };          // fresh load: nothing materialised yet
+	global.Animator.open = false;            // still in edit mode
+	global.Project = { saved: true };        // a freshly loaded project
+
+	// A position-animated body bone that only appears once select_mode(animate) fires.
+	var posKf = new H.MockKeyframe({ channel: 'position', time: 0.25, data_points: [{ x: 8, y: 0, z: 0 }] });
+	var an = new H.MockBoneAnimator({ name: 'body', uuid: proj.root.uuid, group: proj.root, position: [posKf] });
+	var walk = new H.MockAnimation({ name: 'walk', length: 1, loop: 'loop', animators: [an] });
+	walk.saved = true;
+	hytaleLazyAnim = walk;
+	dispatchLog.length = 0;
+	resetLogs();
+
+	toolsActions[0].click();                 // opening the dialog should trigger the load
+	assert.ok(dispatchLog.some(function (d) { return d.event === 'select_mode' && d.mode === 'animate'; }), 'fires select_mode(animate) to trigger the lazy load');
+	assert.strictEqual(global.Animation.all.length, 1, 'animation is now loaded into the project');
+	assert.strictEqual(lastDialog.getFormResult().scale_animations, true, 'scale-animations checkbox defaults on now that an animation is present');
+
+	lastDialog.setFormValues({ factor: 0.5, scale_animations: true });
+	lastDialog.confirm();
+	assert.deepStrictEqual([posKf.get('x'), posKf.get('y'), posKf.get('z')], [4, 0, 0], 'the lazy-loaded position keyframe is scaled');
+	global.Animation = { all: [] };
+});
+
+test('the animation pre-load fires at most once per project', function () {
+	setProject(buildProject().roots);
+	global.Format = { id: 'hytale_character' };
+	global.Animation = { all: [] };
+	global.Animator.open = false;
+	global.Project = { saved: true };        // fresh project, no animations to find
+	hytaleLazyAnim = null;                    // nothing will load
+	dispatchLog.length = 0;
+
+	toolsActions[0].click();
+	assert.strictEqual(dispatchLog.filter(function (d) { return d.event === 'select_mode'; }).length, 1, 'fires once on the first open');
+	toolsActions[0].click();
+	assert.strictEqual(dispatchLog.filter(function (d) { return d.event === 'select_mode'; }).length, 1, 'does not fire again for the same project');
+	global.Animation = { all: [] };
+});
+
+test('no spurious select_mode dispatch when animations are already loaded', function () {
+	var proj = buildProject();
+	setProject(proj.roots);
+	global.Format = { id: 'hytale_character' };
+	var posKf = new H.MockKeyframe({ channel: 'position', time: 0.25, data_points: [{ x: 8, y: 0, z: 0 }] });
+	var an = new H.MockBoneAnimator({ name: 'body', uuid: proj.root.uuid, group: proj.root, position: [posKf] });
+	global.Animation = { all: [new H.MockAnimation({ name: 'walk', length: 1, loop: 'loop', animators: [an] })] };
+	global.Animator.open = false;
+	hytaleLazyAnim = null;
+	dispatchLog.length = 0;
+
+	toolsActions[0].click();
+	assert.ok(!dispatchLog.some(function (d) { return d.event === 'select_mode'; }), 'does not fire select_mode when animations are already present');
 	global.Animation = { all: [] };
 });
 

@@ -16,7 +16,7 @@ The action shows up under **Tools → Scale Model — Preserve UV** when a Hytal
 
 * **Scale factor** — 0.1 to 10, with presets (×0.25, ×0.5, ×2, ×4). Factor 1 does nothing.
 * **Scope** — the whole model, or just the selected hierarchy.
-* **Pivot** — model origin, the selected root, or a custom point.
+* **Pivot** — model origin, the selected root, or a custom point. Choosing "Selected Hierarchy" defaults the pivot to the selected root, so the part scales in place instead of moving toward the world origin.
 * **Scale loaded position animations** — also multiply position keyframes by the factor. Rotation, stretch, visibility and UV channels are left alone, and only animations loaded in the project are touched.
 
 ## Bake pose into model
