@@ -19,13 +19,7 @@ The action shows up under **Tools → Scale Model — Preserve UV** when a Hytal
 * **Pivot** — model origin, the selected root, or a custom point.
 * **Scale loaded position animations** — also multiply position keyframes by the factor. Rotation, stretch, visibility and UV channels are left alone, and only animations loaded in the project are touched.
 
-It runs as a single undo step. If something looks off after the transform it rolls back instead of leaving the model half-scaled.
 
-## What changes, what doesn't
-
-Scaled: node positions, group origins, cube centers and pivots, hierarchy offsets, cube `stretch`, and (optionally) position keyframes.
-
-Left alone: base cube size, every UV, UV rotation and mirroring, textures, cube rotations, visibility, shading, the hierarchy, names, and the rotation/stretch/visibility/UV animation channels.
 
 ## Develop
 
