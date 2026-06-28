@@ -127,6 +127,72 @@ global.document = {
 	createElement: function () { return { innerHTML: '', textContent: '', className: '', style: {} }; }
 };
 
+// Mocks for the bake-pose interception feature.
+var nativeBakeCalls = 0;
+var modeEditCalls = 0;
+var originalBakeClickFn = function () { nativeBakeCalls++; };
+global.BarItems = { bake_animation_into_model: { id: 'bake_animation_into_model', click: originalBakeClickFn } };
+global.Animator = { animations: [], MolangParser: { parse: function () { return 1; } } };
+global.Modes = { options: { edit: { select: function () { modeEditCalls++; } } } };
+
+// Minimal but correct THREE quaternion/euler mock (ZYX, matching Blockbench).
+global.THREE = (function () {
+	function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+	function Quaternion(x, y, z, w) { this.x = x || 0; this.y = y || 0; this.z = z || 0; this.w = (w === undefined ? 1 : w); }
+	Quaternion.prototype.setFromEuler = function (e) {
+		var c1 = Math.cos(e.x / 2), c2 = Math.cos(e.y / 2), c3 = Math.cos(e.z / 2);
+		var s1 = Math.sin(e.x / 2), s2 = Math.sin(e.y / 2), s3 = Math.sin(e.z / 2);
+		this.x = s1 * c2 * c3 - c1 * s2 * s3;
+		this.y = c1 * s2 * c3 + s1 * c2 * s3;
+		this.z = c1 * c2 * s3 - s1 * s2 * c3;
+		this.w = c1 * c2 * c3 + s1 * s2 * s3;
+		return this;
+	};
+	Quaternion.prototype.multiply = function (q) {
+		var ax = this.x, ay = this.y, az = this.z, aw = this.w, bx = q.x, by = q.y, bz = q.z, bw = q.w;
+		this.x = ax * bw + aw * bx + ay * bz - az * by;
+		this.y = ay * bw + aw * by + az * bx - ax * bz;
+		this.z = az * bw + aw * bz + ax * by - ay * bx;
+		this.w = aw * bw - ax * bx - ay * by - az * bz;
+		return this;
+	};
+	Quaternion.prototype.conjugate = function () { this.x = -this.x; this.y = -this.y; this.z = -this.z; return this; };
+	Quaternion.prototype.clone = function () { return new Quaternion(this.x, this.y, this.z, this.w); };
+	function Euler(x, y, z, order) { this.x = x || 0; this.y = y || 0; this.z = z || 0; this.order = order || 'ZYX'; }
+	Euler.prototype.setFromQuaternion = function (q, order) {
+		var x = q.x, y = q.y, z = q.z, w = q.w;
+		var m11 = 1 - 2 * (y * y + z * z), m12 = 2 * (x * y - z * w);
+		var m21 = 2 * (x * y + z * w), m22 = 1 - 2 * (x * x + z * z);
+		var m31 = 2 * (x * z - y * w), m32 = 2 * (y * z + x * w), m33 = 1 - 2 * (x * x + y * y);
+		this.y = Math.asin(-clamp(m31, -1, 1));
+		if (Math.abs(m31) < 0.9999999) { this.x = Math.atan2(m32, m33); this.z = Math.atan2(m21, m11); }
+		else { this.x = 0; this.z = Math.atan2(-m12, m22); }
+		this.order = order || 'ZYX';
+		return this;
+	};
+	return { Quaternion: Quaternion, Euler: Euler };
+})();
+
+/* --- faithful Hytale rotation interpolation for the bake tests ------- *
+ * Blockbench composes a rotation keyframe K with the bone's rest rotation
+ * F (its fix_rotation) and interpolate() returns euler(F*K) - F, in degrees,
+ * ZYX. The previous mock just echoed the stored keyframe value, which hid the
+ * exact bug this feature exists to handle. Model it properly so the sim fails
+ * on a wrong re-base. F is read live from the group, so capture (old rest) and
+ * the post-bake self-check (new rest) differ just like they do in Blockbench. */
+var D2R = Math.PI / 180, R2D = 180 / Math.PI;
+function quatFromDeg(deg) {
+	return new THREE.Quaternion().setFromEuler(new THREE.Euler(deg[0] * D2R, deg[1] * D2R, deg[2] * D2R, 'ZYX'));
+}
+function eulerDegFromQuat(q) {
+	var e = new THREE.Euler().setFromQuaternion(q, 'ZYX');
+	return [e.x * R2D, e.y * R2D, e.z * R2D];
+}
+function bakeInterpRotation(group, K) {
+	var fk = eulerDegFromQuat(quatFromDeg(group.rotation).multiply(K));
+	return [fk[0] - group.rotation[0], fk[1] - group.rotation[1], fk[2] - group.rotation[2]];
+}
+
 /* ----------------------------- load the built plugin ---------------- */
 
 require(path.join('..', 'dist', 'hytale_uv_preserving_scale.js'));
@@ -328,13 +394,144 @@ test('failure inside the transaction rolls back fully (restore + cancelEdit + er
 	assert.ok(msgBoxes.some(function (m) { return /failed|restored/i.test(m.message); }), 'error message shown');
 });
 
-test('onunload deletes the action and dialog', function () {
+/* ----------------------------- bake-pose interception ------------------ */
+
+function buildBakeAnim(group, rotVals, posVals, extraRotKfs) {
+	var rotKf = new H.MockKeyframe({ channel: 'rotation', time: 0.25, data_points: [{ x: rotVals[0], y: rotVals[1], z: rotVals[2] }] });
+	var posKf = new H.MockKeyframe({ channel: 'position', time: 0.25, data_points: [{ x: posVals[0], y: posVals[1], z: posVals[2] }] });
+	var rotList = [rotKf].concat(extraRotKfs || []);
+	var an = new H.MockBoneAnimator({ name: group.name, uuid: group.uuid, group: group, rotation: rotList, position: [posKf] });
+	an.channels = { rotation: true, position: true };
+	// The timeline cursor sits on rotKf (the bake frame); interpolate() models the
+	// real euler(F*K) - F so capture and the self-check see the rest pose live.
+	an.interpolate = function (channel) {
+		if (channel === 'rotation') {
+			return bakeInterpRotation(group, quatFromDeg([Number(rotKf.get('x')), Number(rotKf.get('y')), Number(rotKf.get('z'))]));
+		}
+		if (channel === 'position') return [Number(posKf.get('x')), Number(posKf.get('y')), Number(posKf.get('z'))];
+		return false;
+	};
+	var anim = new H.MockAnimation({ name: 'bakeanim', length: 1, loop: 'loop', animators: [an] });
+	anim.playing = true;
+	anim.getBoneAnimator = function (g) { return g === group ? an : null; };
+	return { anim: anim, an: an, rotKf: rotKf, posKf: posKf, rotList: rotList };
+}
+
+test('native bake action is intercepted (wrapped) after load', function () {
+	assert.notStrictEqual(global.BarItems.bake_animation_into_model.click, originalBakeClickFn, 'click is wrapped by the plugin');
+});
+
+test('intercepted bake + re-base: one undo, rest pose baked, animations shifted', function () {
+	var proj = buildProject(); setProject(proj.roots);
+	global.Format = { id: 'hytale_character' };
+	var b = buildBakeAnim(proj.root, [10, 0, 0], [0, 6, 0]);
+	global.Animation = { all: [b.anim] };
+	global.Animator.animations = [b.anim];
+	var rotBefore = proj.root.rotation.slice();
+	var originBefore = proj.root.origin.slice();
+	resetLogs(); nativeBakeCalls = 0; modeEditCalls = 0;
+
+	global.BarItems.bake_animation_into_model.click();      // intercepted -> popup
+	assert.ok(lastDialog, 'bake dialog opened');
+	lastDialog.confirm();                                   // re-base default true
+
+	assert.strictEqual(nativeBakeCalls, 0, 'native bake not called in the combined path');
+	assert.strictEqual(undoLog.init, 1, 'initEdit once');
+	assert.strictEqual(undoLog.finish, 1, 'finishEdit once');
+	assert.strictEqual(undoLog.cancel, 0, 'no rollback');
+	assert.ok(/re-based/.test(undoLog.lastLabel), 'undo label mentions re-based');
+	assert.ok(P.vecNearlyEqual(proj.root.rotation, [rotBefore[0] + 10, rotBefore[1], rotBefore[2]], 1e-6), 'bone rotation baked (native euler add)');
+	assert.deepStrictEqual(proj.root.origin, [originBefore[0], originBefore[1] + 6, originBefore[2]], 'bone origin baked');
+	assert.ok(P.vecNearlyEqual([b.rotKf.get('x'), b.rotKf.get('y'), b.rotKf.get('z')], [0, 0, 0], 1e-6), 'rotation keyframe re-based to ~0');
+	assert.deepStrictEqual([b.posKf.get('x'), b.posKf.get('y'), b.posKf.get('z')], [0, 0, 0], 'position keyframe re-based to 0');
+	assert.strictEqual(b.anim.saved, false, 'animation marked unsaved');
+	assert.strictEqual(global.Project.saved, false, 'project marked unsaved');
+	assert.ok(modeEditCalls >= 1, 'switched to edit mode (matches native)');
+	assert.ok(quickMsgs.some(function (m) { return /re-based/.test(m); }), 'success message shown');
+});
+
+test('quaternion rotation re-base: multi-axis pose + non-zero rest passes the self-check (no rollback)', function () {
+	var proj = buildProject(); setProject(proj.roots);
+	global.Format = { id: 'hytale_character' };
+	proj.root.rotation = [5, 10, 0];                 // non-zero rest rotation
+	var b = buildBakeAnim(proj.root, [10, 20, 30], [0, 0, 0]); // combined multi-axis pose
+	global.Animation = { all: [b.anim] }; global.Animator.animations = [b.anim];
+	resetLogs(); nativeBakeCalls = 0;
+
+	global.BarItems.bake_animation_into_model.click();
+	lastDialog.confirm();
+
+	assert.strictEqual(undoLog.finish, 1, 'committed');
+	assert.strictEqual(undoLog.cancel, 0, 'no rollback — rotation self-check passed (euler subtraction would have failed here)');
+	assert.ok(P.vecNearlyEqual([b.rotKf.get('x'), b.rotKf.get('y'), b.rotKf.get('z')], [0, 0, 0], 1e-6), 'rotation keyframe collapses at the baked frame');
+	assert.ok(!P.vecNearlyEqual(proj.root.rotation, [5, 10, 0], 1e-6), 'rest rotation changed by the bake');
+});
+
+test('rotation re-base keeps every keyframe pose against the new rest (end-to-end)', function () {
+	var proj = buildProject(); setProject(proj.roots);
+	global.Format = { id: 'hytale_character' };
+	proj.root.rotation = [8, -12, 4];                                  // non-zero rest
+	var restBefore = proj.root.rotation.slice();
+	var kfB_raw = [-15, 25, 5];                                        // a second, non-cursor keyframe
+	var kfB = new H.MockKeyframe({ channel: 'rotation', time: 0.5, data_points: [{ x: kfB_raw[0], y: kfB_raw[1], z: kfB_raw[2] }] });
+	var b = buildBakeAnim(proj.root, [10, 20, 30], [0, 0, 0], [kfB]);  // cursor pose = [10,20,30]
+	global.Animation = { all: [b.anim] }; global.Animator.animations = [b.anim];
+
+	// World orientation at kfB before the bake (rest * key), for the invariance check.
+	var worldBefore = eulerDegFromQuat(quatFromDeg(restBefore).multiply(quatFromDeg(kfB_raw)));
+	// Independently derive the expected re-based kfB (= K0^-1 * K_B) from the plugin's own math.
+	var off = b.an.interpolate('rotation');
+	var qFnew = quatFromDeg([restBefore[0] + off[0], restBefore[1] + off[1], restBefore[2] + off[2]]);
+	var K0inv = quatFromDeg(restBefore).conjugate().multiply(qFnew).conjugate();
+	var expectedB = eulerDegFromQuat(K0inv.clone().multiply(quatFromDeg(kfB_raw)));
+
+	resetLogs(); nativeBakeCalls = 0;
+	global.BarItems.bake_animation_into_model.click();
+	lastDialog.confirm();
+
+	assert.strictEqual(undoLog.finish, 1, 'committed, no rollback');
+	assert.strictEqual(undoLog.cancel, 0, 'self-check passed');
+	assert.ok(P.vecNearlyEqual([b.rotKf.get('x'), b.rotKf.get('y'), b.rotKf.get('z')], [0, 0, 0], 1e-6), 'bake-frame key collapses to ~0');
+	assert.ok(P.vecNearlyEqual([kfB.get('x'), kfB.get('y'), kfB.get('z')], expectedB, 1e-6), 'second key re-based to K0^-1 * K');
+	// The decisive end-to-end property: new rest * re-based key == old rest * old key.
+	var worldAfter = eulerDegFromQuat(quatFromDeg(proj.root.rotation).multiply(quatFromDeg([kfB.get('x'), kfB.get('y'), kfB.get('z')])));
+	assert.ok(P.vecNearlyEqual(worldBefore, worldAfter, 1e-6), 'world orientation at kfB unchanged by the bake');
+});
+
+test('intercepted bake with re-base OFF performs the plain native bake', function () {
+	var proj = buildProject(); setProject(proj.roots);
+	global.Format = { id: 'hytale_character' };
+	var b = buildBakeAnim(proj.root, [10, 0, 0], [0, 6, 0]);
+	global.Animation = { all: [b.anim] }; global.Animator.animations = [b.anim];
+	resetLogs(); nativeBakeCalls = 0;
+
+	global.BarItems.bake_animation_into_model.click();
+	lastDialog.setFormValues({ rebase: false });
+	lastDialog.confirm();
+
+	assert.strictEqual(nativeBakeCalls, 1, 'native bake called');
+	assert.strictEqual(undoLog.init, 0, 'no plugin transaction');
+	assert.deepStrictEqual([b.rotKf.get('x'), b.rotKf.get('y'), b.rotKf.get('z')], [10, 0, 0], 'keyframes untouched');
+});
+
+test('native bake passes through unchanged for non-Hytale formats (no popup)', function () {
+	global.Format = { id: 'java_block' };
+	resetLogs(); nativeBakeCalls = 0; lastDialog = null;
+	global.BarItems.bake_animation_into_model.click();
+	assert.strictEqual(nativeBakeCalls, 1, 'native called directly');
+	assert.strictEqual(lastDialog, null, 'no popup for non-Hytale');
+	assert.strictEqual(undoLog.init, 0, 'no plugin transaction');
+	global.Format = { id: 'hytale_character' };
+});
+
+test('onunload deletes the action and dialog, and restores the native bake', function () {
 	deleted.action = false; deleted.dialog = false;
 	// ensure a dialog instance exists to be cleaned up
 	toolsActions[0].click();
 	registered.opts.onunload();
 	assert.strictEqual(deleted.action, true, 'action deleted');
 	assert.strictEqual(deleted.dialog, true, 'dialog deleted');
+	assert.strictEqual(global.BarItems.bake_animation_into_model.click, originalBakeClickFn, 'native bake click restored');
 });
 
 /* ----------------------------- results ------------------------------ */

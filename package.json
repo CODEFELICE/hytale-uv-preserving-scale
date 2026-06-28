@@ -27,6 +27,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "git+https://github.com/CODEFELICE/hytale-uv-preserving-scale.git"
   }
 }

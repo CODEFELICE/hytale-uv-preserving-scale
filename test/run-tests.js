@@ -224,6 +224,15 @@ test('13. scale/shapeStretch keyframes are NOT touched by position scaling', fun
 	assert.deepStrictEqual([posKf.get('x'), posKf.get('y'), posKf.get('z')], [2, 2, 2], 'position keyframe scaled');
 });
 
+test('13b. rebaseKeyframeValue subtracts the baked offset (numbers, numeric strings, expressions, no-op)', function () {
+	assert.strictEqual(P.rebaseKeyframeValue(9, 4), 5, 'number minus offset');
+	assert.strictEqual(P.rebaseKeyframeValue(-12, -12), 0, 'collapses to 0 at the baked frame');
+	assert.ok(Object.is(P.rebaseKeyframeValue(-12, -12), 0), 'no negative zero');
+	assert.strictEqual(P.rebaseKeyframeValue('8', 0.5), 7.5, 'numeric string');
+	assert.strictEqual(P.rebaseKeyframeValue(3, 0), 3, 'offset 0 is a no-op');
+	assert.strictEqual(P.rebaseKeyframeValue('math.sin(q.life)', 2), '(math.sin(q.life)) - (2)', 'expression wrapped');
+});
+
 /* 14. Repeated application of scaling */
 section('Robustness tests');
 

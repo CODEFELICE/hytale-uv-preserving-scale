@@ -19,7 +19,9 @@ The action shows up under **Tools → Scale Model — Preserve UV** when a Hytal
 * **Pivot** — model origin, the selected root, or a custom point.
 * **Scale loaded position animations** — also multiply position keyframes by the factor. Rotation, stretch, visibility and UV channels are left alone, and only animations loaded in the project are touched.
 
+## Bake pose into model
 
+The plugin also wraps Blockbench's **Bake Animation Pose into Model**. Baking a pose changes the model's rest pose, which would normally break your other animations — they're stored relative to the old rest. With the re-base option (on by default in the popup), every loaded animation is shifted onto the new rest pose in the same undo step, so they keep playing. Rotation is re-based through quaternions so it matches Hytale's interpolation exactly; position is shifted too. Scale is left to the native action, which doesn't bake it. Untick the option for the plain native bake.
 
 ## Develop
 
